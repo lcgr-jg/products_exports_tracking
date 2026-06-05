@@ -12,7 +12,10 @@ from export_pace.config import Settings, load_settings
 from export_pace.locations import LocationSelection, location_label, overlap_warning
 from export_pace.flows_disk_cache import clear_flows_disk_cache, load_flows, save_flows
 from export_pace.transform import (
+    build_history_daily_matrix,
     build_history_matrix,
+    build_pace_heatmap,
+    detect_anomaly_days,
     percentile_rank_at_day,
     prev_month,
     resolve_as_of,
@@ -44,7 +47,11 @@ class ViewResult:
     percentile_rank: float | None
     destinations_mtd: pd.Series
     origin_daily: pd.DataFrame | None
+    origin_cumulative: pd.DataFrame | None
     location_series: dict[str, pd.Series]
+    product_series: dict[str, pd.Series]
+    heatmap_pct: pd.DataFrame
+    anomaly_days: list[int]
 
 
 def filter_label(values: list[str], *, sep: str = ", ") -> str:
@@ -436,6 +443,39 @@ class ExportDataService:
                 out[label] = to_dom_cumulative(live_daily)
         return out
 
+    def get_product_series(
+        self,
+        *,
+        locations: LocationSelection,
+        products: tuple[str, ...],
+        year: int,
+        month: int,
+        target_year: int,
+        n_history: int,
+        as_of: date | None,
+        with_forecast_live: bool | None = None,
+    ) -> dict[str, pd.Series]:
+        """Per-product cumulative MTD curves when multiple products are selected."""
+        if len(products) < 2:
+            return {}
+        out: dict[str, pd.Series] = {}
+        for product in products:
+            live_daily = self.get_export_daily(
+                year,
+                month,
+                locations=locations,
+                products=(product,),
+                target_year=target_year,
+                n_history=n_history,
+                live=True,
+                with_forecast_live=with_forecast_live,
+            )
+            if as_of is not None:
+                live_daily = live_daily[live_daily.index.date <= as_of]
+            if not live_daily.empty:
+                out[product] = to_dom_cumulative(live_daily)
+        return out
+
     @staticmethod
     def _flows_df_to_daily(df: pd.DataFrame, year: int, month: int) -> pd.Series:
         dt = pd.to_datetime(df["Date"])
@@ -532,6 +572,7 @@ class ExportDataService:
         as_of_day: int | None = None,
         with_forecast_live: bool | None = None,
         compare_locations: bool = False,
+        compare_products: bool = False,
     ) -> ViewResult:
         if locations.is_empty:
             raise ValueError("Select at least one zone or installation")
@@ -555,6 +596,7 @@ class ExportDataService:
 
         hist_years = list(range(target_year - n_history, target_year))
         hist = build_history_matrix(month, hist_years, get_daily)
+        hist_daily = build_history_daily_matrix(month, hist_years, get_daily)
         band = seasonal_band(hist)
 
         live_daily = self.get_export_daily(
@@ -605,6 +647,8 @@ class ExportDataService:
             as_of=as_of,
             with_forecast_live=with_forecast_live,
         )
+        origin_cumulative = origin_daily.cumsum() if origin_daily is not None else None
+
         location_series: dict[str, pd.Series] = {}
         if compare_locations:
             location_series = self.get_location_series(
@@ -617,6 +661,22 @@ class ExportDataService:
                 as_of=as_of,
                 with_forecast_live=with_forecast_live,
             )
+
+        product_series: dict[str, pd.Series] = {}
+        if compare_products:
+            product_series = self.get_product_series(
+                locations=locations,
+                products=product_tuple,
+                year=target_year,
+                month=month,
+                target_year=target_year,
+                n_history=n_history,
+                as_of=as_of,
+                with_forecast_live=with_forecast_live,
+            )
+
+        heatmap_pct = build_pace_heatmap(hist, current, target_year, days_in_month)
+        anomaly_days = detect_anomaly_days(current_daily, hist_daily)
 
         return ViewResult(
             current=current,
@@ -640,7 +700,11 @@ class ExportDataService:
             percentile_rank=pct_rank,
             destinations_mtd=destinations_mtd,
             origin_daily=origin_daily,
+            origin_cumulative=origin_cumulative,
             location_series=location_series,
+            product_series=product_series,
+            heatmap_pct=heatmap_pct,
+            anomaly_days=anomaly_days,
         )
 
 

@@ -40,13 +40,22 @@ PRESET_INSTALLATION_OPTIONS = [
     {"label": "Duqm Refinery (installation)", "value": "installation:Duqm Refinery"},
 ]
 
+# Flows API product names (validated). Type 2+ chars in the dropdown to search all Kpler products.
 PRESET_PRODUCT_OPTIONS = [
     {"label": "Diesel", "value": "Diesel"},
     {"label": "Gasoil", "value": "Gasoil"},
-    {"label": "Crude", "value": "Crude"},
+    {"label": "Gasoline", "value": "Gasoline"},
+    {"label": "95 Gasoline", "value": "95 Gasoline"},
+    {"label": "98 Gasoline", "value": "98 Gasoline"},
+    {"label": "Middle Distillates", "value": "Middle Distillates"},
     {"label": "Jet", "value": "Jet"},
+    {"label": "Kerosene", "value": "Kerosene"},
     {"label": "Naphtha", "value": "Naphtha"},
-    {"label": "Fuel Oil", "value": "Fuel Oil"},
+    {"label": "Crude", "value": "Crude"},
+    {"label": "Condensate", "value": "Condensate"},
+    {"label": "Fuel Oils", "value": "Fuel Oils"},
+    {"label": "VLSFO", "value": "VLSFO"},
+    {"label": "HSFO", "value": "HSFO"},
 ]
 
 

@@ -31,6 +31,69 @@ def build_history_matrix(
     ).sort_index()
 
 
+def build_history_daily_matrix(
+    month: int,
+    years: list[int],
+    get_daily,
+) -> pd.DataFrame:
+    """day_of_month (rows) x year (cols) non-cumulative daily export matrix."""
+    frames: dict[int, pd.Series] = {}
+    for y in years:
+        daily = get_daily(y, month)
+        if daily.empty:
+            continue
+        s = daily.copy()
+        s.index = s.index.day
+        frames[y] = s
+    if not frames:
+        return pd.DataFrame()
+    return pd.DataFrame(frames).sort_index()
+
+
+def build_pace_heatmap(
+    hist_cumulative: pd.DataFrame,
+    current: pd.Series,
+    target_year: int,
+    days_in_month: int,
+) -> pd.DataFrame:
+    """Years × day-of-month matrix: cumulative exports as % of that year's month total."""
+    combined = hist_cumulative.copy()
+    combined[target_year] = current
+    rows: dict[int, pd.Series] = {}
+    dom_index = list(range(1, days_in_month + 1))
+    for year in sorted(combined.columns):
+        series = combined[year].reindex(dom_index).ffill().fillna(0)
+        last_dom = int(series[series > 0].index.max()) if (series > 0).any() else days_in_month
+        eom = float(series.loc[last_dom]) if last_dom in series.index else float(series.max())
+        if eom <= 0:
+            eom = 1.0
+        rows[year] = (series / eom * 100).clip(0, 100)
+    return pd.DataFrame(rows).T
+
+
+def detect_anomaly_days(
+    current_daily: pd.Series,
+    hist_daily: pd.DataFrame,
+    *,
+    sigma: float = 2.0,
+) -> list[int]:
+    """Days where current daily volume exceeds historical same-DOM median + sigma × std."""
+    flagged: list[int] = []
+    for day, value in current_daily.items():
+        if day not in hist_daily.index or value != value:
+            continue
+        ref = hist_daily.loc[day].dropna()
+        if len(ref) < 2:
+            continue
+        med = float(ref.median())
+        std = float(ref.std())
+        if std <= 0:
+            continue
+        if value > med + sigma * std:
+            flagged.append(int(day))
+    return sorted(flagged)
+
+
 def seasonal_band(hist: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=hist.index)
     out["median"] = hist.median(axis=1)

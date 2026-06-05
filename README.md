@@ -76,7 +76,16 @@ The location dropdown is grouped:
 
 Type 2+ characters to live-search ports, refineries, and anything else (`Yanbu`, `Rotterdam`, …). Installation-only names (e.g. `Duqm Refinery`) appear as a fallback when zone search returns nothing.
 
+**Products:** The dropdown lists common desk products (Diesel, Gasoline, Gasoil, VLSFO, …). Type 2+ characters to search the full Kpler product catalog (e.g. `gasol`, `propane`).
+
 Zone catalog is cached for a week in `.cache/kpler_zones.json`.
+
+## v3 features (analytics)
+
+- **Cumulative MTD by installation** — stacked area chart (replaces daily stacked bars) when one zone is selected
+- **Month pacing heatmap** — years × day-of-month, color = % of that year's month-end total reached
+- **Compare products** — overlay separate MTD curves per product (e.g. Diesel vs Gasoil) on the main chart
+- **Volume anomaly flags** — daily bars highlighted when volume exceeds historical same-day median + 2σ; listed in status line
 
 ## v2 features (desk analytics)
 

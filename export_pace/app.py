@@ -25,8 +25,9 @@ from export_pace.figure import (
     make_data_status_line,
     make_destination_figure,
     make_figure,
+    make_heatmap_figure,
     make_kpi_strip,
-    make_origin_stacked_figure,
+    make_origin_cumulative_figure,
 )
 from export_pace.locations import (
     as_filter_list,
@@ -36,7 +37,7 @@ from export_pace.locations import (
 settings = load_settings()
 today = date.today()
 
-OVERLAY_DEFAULTS = ["bands", "median", "last_month", "last_year"]
+OVERLAY_DEFAULTS = ["bands", "median", "last_month", "last_year", "anomalies"]
 
 
 def _data_source_status() -> str:
@@ -143,6 +144,8 @@ app.layout = dbc.Container(
                                         {"label": "Last year", "value": "last_year"},
                                         {"label": "Prior years (fan)", "value": "hist_years"},
                                         {"label": "Compare locations", "value": "compare_locations"},
+                                        {"label": "Compare products", "value": "compare_products"},
+                                        {"label": "Flag volume anomalies", "value": "anomalies"},
                                     ],
                                     value=OVERLAY_DEFAULTS,
                                     inline=True,
@@ -227,6 +230,7 @@ app.layout = dbc.Container(
         html.Div(id="kpi-strip"),
         dcc.Loading(dcc.Graph(id="chart"), type="circle", color="#2171b5"),
         dcc.Loading(dcc.Graph(id="daily-chart"), type="dot", color="#6baed6"),
+        dcc.Loading(dcc.Graph(id="heatmap-chart"), type="dot", color="#2171b5"),
         dbc.Row(
             [
                 dbc.Col(dcc.Loading(dcc.Graph(id="destination-chart"), type="dot", color="#6baed6"), md=6),
@@ -348,6 +352,7 @@ def update_as_of_max(month, year):
     Output("daily-chart", "figure"),
     Output("destination-chart", "figure"),
     Output("origin-chart", "figure"),
+    Output("heatmap-chart", "figure"),
     Output("kpi-strip", "children"),
     Output("data-status", "children"),
     Output("status-alert", "children"),
@@ -392,6 +397,7 @@ def update_view(
             empty,
             empty,
             empty,
+            empty,
             [],
             html.Div(),
             "Select at least one zone or installation.",
@@ -402,6 +408,7 @@ def update_view(
     if not product_values:
         empty = make_figure_placeholder("Select at least one product.")
         return (
+            empty,
             empty,
             empty,
             empty,
@@ -436,6 +443,8 @@ def update_view(
         show_last_year="last_year" in toggles,
         show_hist_years="hist_years" in toggles,
         compare_locations="compare_locations" in toggles,
+        compare_products="compare_products" in toggles,
+        show_anomalies="anomalies" in toggles,
     )
 
     is_live_month = year == today.year and month == today.month
@@ -453,24 +462,29 @@ def update_view(
             as_of_day=resolved_as_of_day,
             with_forecast_live=forecast_on,
             compare_locations=fig_opts.compare_locations,
+            compare_products=fig_opts.compare_products,
         )
     except Exception as exc:
         empty = make_figure_placeholder(f"Error loading data: {exc}")
-        return empty, empty, empty, empty, [], html.Div(), str(exc), True, "danger", last_refresh
+        return empty, empty, empty, empty, empty, [], html.Div(), str(exc), True, "danger", last_refresh
 
     dest_fig = make_destination_figure(view) or make_figure_placeholder(
         "No destination breakdown for this selection."
     )
-    origin_fig = make_origin_stacked_figure(view) or make_figure_placeholder(
-        "Installation breakdown appears when exactly one zone is selected (no facilities)."
+    origin_fig = make_origin_cumulative_figure(view) or make_figure_placeholder(
+        "Cumulative installation breakdown appears when exactly one zone is selected (no facilities)."
+    )
+    heatmap_fig = make_heatmap_figure(view) or make_figure_placeholder(
+        "No heatmap data for this selection."
     )
 
     alert_msg = view.warning
     return (
         make_figure(view, fig_opts),
-        make_daily_figure(view),
+        make_daily_figure(view, fig_opts),
         dest_fig,
         origin_fig,
+        heatmap_fig,
         make_kpi_strip(view),
         make_data_status_line(view, refreshed_at=refreshed_at),
         alert_msg,

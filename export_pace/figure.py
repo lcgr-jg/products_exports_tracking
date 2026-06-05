@@ -19,6 +19,8 @@ class FigureOptions:
     show_last_year: bool = True
     show_hist_years: bool = False
     compare_locations: bool = False
+    compare_products: bool = False
+    show_anomalies: bool = True
 
 
 def _pct_delta(current: float, reference: float) -> str:
@@ -118,9 +120,20 @@ def make_figure(view: ViewResult, opts: FigureOptions | None = None) -> go.Figur
                 )
             )
 
-    show_compare = opts.compare_locations and len(view.location_series) > 1
     palette = ["#e6550d", "#756bb1", "#31a354", "#d95f0e", "#1f78b4", "#e7298a", "#66a61e"]
-    if show_compare:
+    show_products = opts.compare_products and len(view.product_series) > 1
+    show_locations = opts.compare_locations and len(view.location_series) > 1
+    if show_products:
+        for i, (label, series) in enumerate(view.product_series.items()):
+            fig.add_trace(
+                go.Scatter(
+                    x=series.index,
+                    y=series.values,
+                    name=label,
+                    line=dict(color=palette[i % len(palette)], width=2.5),
+                )
+            )
+    elif show_locations:
         for i, (label, series) in enumerate(view.location_series.items()):
             fig.add_trace(
                 go.Scatter(
@@ -188,12 +201,8 @@ def make_destination_figure(view: ViewResult, *, top_n: int = 10) -> go.Figure |
     return fig
 
 
-def make_origin_stacked_figure(view: ViewResult) -> go.Figure | None:
-    if view.origin_daily is None or view.origin_daily.empty:
-        return None
-    month_name = calendar.month_name[view.month]
-    fig = go.Figure()
-    palette = [
+def _installation_palette() -> list[str]:
+    return [
         "#3182bd",
         "#6baed6",
         "#9ecae1",
@@ -203,24 +212,35 @@ def make_origin_stacked_figure(view: ViewResult) -> go.Figure | None:
         "#fdae6b",
         "#31a354",
     ]
-    for i, col in enumerate(view.origin_daily.columns):
+
+
+def make_origin_cumulative_figure(view: ViewResult) -> go.Figure | None:
+    """Stacked area of cumulative MTD exports by origin installation (Kpler-style)."""
+    if view.origin_cumulative is None or view.origin_cumulative.empty:
+        return None
+    month_name = calendar.month_name[view.month]
+    fig = go.Figure()
+    palette = _installation_palette()
+    for i, col in enumerate(view.origin_cumulative.columns):
         fig.add_trace(
-            go.Bar(
-                x=view.origin_daily.index,
-                y=view.origin_daily[col],
+            go.Scatter(
+                x=view.origin_cumulative.index,
+                y=view.origin_cumulative[col],
                 name=col,
-                marker_color=palette[i % len(palette)],
+                stackgroup="installations",
+                mode="lines",
+                line=dict(width=0.5, color=palette[i % len(palette)]),
+                fillcolor=palette[i % len(palette)],
             )
         )
     fig.update_layout(
-        barmode="stack",
         title=(
-            f"Daily exports by installation — {view.location_label} — "
+            f"Cumulative MTD by installation — {view.location_label} — "
             f"{month_name} {view.target_year}"
         ),
         xaxis_title="Day of month",
-        yaxis_title=f"{view.unit} / day",
-        xaxis=dict(range=[0.5, 31.5], dtick=2),
+        yaxis_title=f"Cumulative {view.unit} (MTD)",
+        xaxis=dict(range=[1, 31], dtick=2),
         template="plotly_white",
         height=300,
         legend=dict(orientation="h", y=-0.22),
@@ -229,20 +249,58 @@ def make_origin_stacked_figure(view: ViewResult) -> go.Figure | None:
     return fig
 
 
-def make_daily_figure(view: ViewResult) -> go.Figure:
+def make_heatmap_figure(view: ViewResult) -> go.Figure | None:
+    if view.heatmap_pct.empty:
+        return None
+    month_name = calendar.month_name[view.month]
+    z = view.heatmap_pct.values
+    fig = go.Figure(
+        go.Heatmap(
+            z=z,
+            x=view.heatmap_pct.columns,
+            y=[str(y) for y in view.heatmap_pct.index],
+            colorscale="Blues",
+            zmin=0,
+            zmax=100,
+            colorbar=dict(title="% of month"),
+            hovertemplate="Year %{y}<br>Day %{x}<br>%{z:.0f}% of month total<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title=f"Month pacing heatmap — {month_name} — {view.location_label}",
+        xaxis_title="Day of month",
+        yaxis_title="Year",
+        template="plotly_white",
+        height=max(220, 36 + 28 * len(view.heatmap_pct.index)),
+        margin=dict(l=60, r=20, t=50, b=40),
+    )
+    return fig
+
+
+def make_daily_figure(view: ViewResult, opts: FigureOptions | None = None) -> go.Figure:
+    opts = opts or FigureOptions()
     month_name = calendar.month_name[view.month]
     unit_label = "kb" if view.unit == "kb" else "kbd"
+    anomaly_set = set(view.anomaly_days) if opts.show_anomalies else set()
+    colors = [
+        "#e6550d" if day in anomaly_set else "#6baed6"
+        for day in view.current_daily.index
+    ]
 
     fig = go.Figure(
         go.Bar(
             x=view.current_daily.index,
             y=view.current_daily.values,
             name="Daily exports",
-            marker_color="#6baed6",
+            marker_color=colors,
         )
     )
+    anomaly_note = ""
+    if anomaly_set:
+        anomaly_note = f" — {len(anomaly_set)} high-volume day(s) flagged (>2σ vs history)"
+
     fig.update_layout(
-        title=f"Daily {view.product_label} exports — {month_name} {view.target_year}",
+        title=f"Daily {view.product_label} exports — {month_name} {view.target_year}{anomaly_note}",
         xaxis_title="Day of month",
         yaxis_title=f"{unit_label} / day",
         xaxis=dict(range=[0.5, 31.5], dtick=2),
@@ -264,6 +322,8 @@ def make_data_status_line(view: ViewResult, *, refreshed_at: datetime | None = N
         parts.append(f"Refreshed: {refreshed_at.strftime('%H:%M:%S')}")
     if view.use_mock:
         parts.append("MOCK data")
+    if view.anomaly_days:
+        parts.append(f"Anomaly days: {', '.join(str(d) for d in view.anomaly_days)}")
     if not parts:
         parts.append("No flow data in range")
     return html.Div(
