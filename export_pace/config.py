@@ -19,7 +19,8 @@ class Settings:
     with_forecast_live: bool = False
     with_forecast_hist: bool = False
     only_realized_hist: bool = True
-    with_intra_country: bool = True
+    with_intra_country: bool = False
+    with_intra_region: bool = True
     n_history: int = 5
     use_disk_cache: bool = True
 

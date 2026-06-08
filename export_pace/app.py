@@ -7,6 +7,7 @@ import dash_bootstrap_components as dbc
 from dash import Input, Output, State, ctx, dcc, html, no_update
 
 from export_pace.config import kpler_sdk_available, load_settings
+from export_pace.flow_direction import FLOW_DIRECTION_OPTIONS, location_role_label, parse_flow_direction
 from export_pace.data import get_data_service
 from export_pace.dimensions import (
     get_base_product_options,
@@ -66,9 +67,9 @@ app.layout = dbc.Container(
             [
                 dbc.Col(
                     [
-                        html.H2("Cumulative MTD Export Pace", className="mt-4 mb-1"),
+                        html.H2("Cumulative MTD Flow Pace", className="mt-4 mb-1"),
                         html.P(
-                            "Kpler Flows daily exports with seasonal bands.",
+                            "Kpler Flows daily exports, imports, or net exports with seasonal bands.",
                             className="text-muted mb-0",
                         ),
                     ],
@@ -93,7 +94,19 @@ app.layout = dbc.Container(
                     [
                         dbc.Col(
                             [
-                                html.Label("Zones / countries / ports (type 2+ chars to search)"),
+                                html.Label("Flow direction"),
+                                dbc.RadioItems(
+                                    id="flow-direction",
+                                    options=FLOW_DIRECTION_OPTIONS,
+                                    value="export",
+                                    inline=True,
+                                ),
+                            ],
+                            md=12,
+                        ),
+                        dbc.Col(
+                            [
+                                html.Label(id="zones-label"),
                                 dcc.Dropdown(
                                     id="locations-zones",
                                     options=ZONE_OPTIONS,
@@ -107,7 +120,7 @@ app.layout = dbc.Container(
                         ),
                         dbc.Col(
                             [
-                                html.Label("Installations / facilities (from selected zones)"),
+                                html.Label(id="installations-label"),
                                 dcc.Dropdown(
                                     id="locations-installations",
                                     options=[],
@@ -220,6 +233,27 @@ app.layout = dbc.Container(
                             ],
                             md=2,
                         ),
+                        dbc.Col(
+                            [
+                                html.Label("Flow scope"),
+                                dbc.Checklist(
+                                    id="intra-flow-toggles",
+                                    options=[
+                                        {
+                                            "label": "Include intra-country flows",
+                                            "value": "intra_country",
+                                        },
+                                        {
+                                            "label": "Include intra-region flows",
+                                            "value": "intra_region",
+                                        },
+                                    ],
+                                    value=["intra_region"],
+                                    inline=True,
+                                ),
+                            ],
+                            md=4,
+                        ),
                     ],
                     className="g-3",
                 )
@@ -261,6 +295,34 @@ def _sanitize_installations(values):
     ]
 
 
+def _intra_flow_flags(toggles: list[str] | None) -> tuple[bool, bool]:
+    selected = toggles or []
+    return "intra_country" in selected, "intra_region" in selected
+
+
+@app.callback(
+    Output("zones-label", "children"),
+    Output("installations-label", "children"),
+    Input("flow-direction", "value"),
+)
+def update_location_labels(flow_direction):
+    direction = parse_flow_direction(flow_direction)
+    role = location_role_label(direction)
+    if direction == "import":
+        zones = (
+            f"Destination zones / countries / ports — imports arriving into selection "
+            f"(type 2+ chars to search)"
+        )
+        installs = f"Destination installations / facilities ({role})"
+    elif direction == "net_export":
+        zones = "Zones / countries / ports — net export balance (type 2+ chars to search)"
+        installs = f"Installations / facilities ({role})"
+    else:
+        zones = "Origin zones / countries / ports (type 2+ chars to search)"
+        installs = f"Origin installations / facilities ({role})"
+    return zones, installs
+
+
 @app.callback(
     Output("locations-zones", "options"),
     Input("locations-zones", "search_value"),
@@ -291,19 +353,31 @@ def clean_zone_selection(selected_values):
     Output("locations-installations", "options"),
     Input("locations-zones", "value"),
     Input("products", "value"),
+    Input("flow-direction", "value"),
+    Input("intra-flow-toggles", "value"),
     Input("locations-installations", "search_value"),
     Input("refresh-btn", "n_clicks"),
     State("locations-installations", "value"),
 )
 def update_installation_options(
-    zone_values, product_values, search_value, refresh_clicks, selected_values
+    zone_values,
+    product_values,
+    flow_direction,
+    intra_toggles,
+    search_value,
+    refresh_clicks,
+    selected_values,
 ):
     force = ctx.triggered_id == "refresh-btn"
+    intra_country, intra_region = _intra_flow_flags(intra_toggles)
     return get_dynamic_installation_options(
         zone_values,
         product_values,
         search_value,
         selected_values,
+        flow_direction=parse_flow_direction(flow_direction),
+        with_intra_country=intra_country,
+        with_intra_region=intra_region,
         force_refresh=force,
     )
 
@@ -311,9 +385,12 @@ def update_installation_options(
 @app.callback(
     Output("locations-installations", "value"),
     Input("locations-installations", "value"),
+    Input("flow-direction", "value"),
     prevent_initial_call=True,
 )
-def clean_installation_selection(selected_values):
+def clean_installation_selection(selected_values, flow_direction):
+    if ctx.triggered_id == "flow-direction":
+        return []
     clean = _sanitize_installations(selected_values)
     original = as_filter_list(selected_values)
     if len(clean) == len(original) and all(a == b for a, b in zip(clean, original)):
@@ -369,6 +446,8 @@ def update_as_of_max(month, year):
     Input("n-history", "value"),
     Input("with-forecast-live", "value"),
     Input("overlay-toggles", "value"),
+    Input("flow-direction", "value"),
+    Input("intra-flow-toggles", "value"),
     Input("refresh-btn", "n_clicks"),
     State("last-refresh", "data"),
 )
@@ -383,6 +462,8 @@ def update_view(
     n_history,
     with_forecast_live,
     overlay_toggles,
+    flow_direction,
+    intra_toggles,
     refresh_clicks,
     last_refresh,
 ):
@@ -435,6 +516,7 @@ def update_view(
             refreshed_at = None
 
     forecast_on = "on" in (with_forecast_live or [])
+    intra_country, intra_region = _intra_flow_flags(intra_toggles)
     toggles = overlay_toggles or []
     fig_opts = FigureOptions(
         show_bands="bands" in toggles,
@@ -463,16 +545,19 @@ def update_view(
             with_forecast_live=forecast_on,
             compare_locations=fig_opts.compare_locations,
             compare_products=fig_opts.compare_products,
+            flow_direction=parse_flow_direction(flow_direction),
+            with_intra_country=intra_country,
+            with_intra_region=intra_region,
         )
     except Exception as exc:
         empty = make_figure_placeholder(f"Error loading data: {exc}")
         return empty, empty, empty, empty, empty, [], html.Div(), str(exc), True, "danger", last_refresh
 
     dest_fig = make_destination_figure(view) or make_figure_placeholder(
-        "No destination breakdown for this selection."
+        f"No {view.counterparty_label} breakdown for this selection."
     )
     origin_fig = make_origin_cumulative_figure(view) or make_figure_placeholder(
-        "Cumulative installation breakdown appears when exactly one zone is selected (no facilities)."
+        "Installation breakdown appears when exactly one zone is selected (no facilities)."
     )
     heatmap_fig = make_heatmap_figure(view) or make_figure_placeholder(
         "No heatmap data for this selection."

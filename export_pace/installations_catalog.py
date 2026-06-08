@@ -9,6 +9,13 @@ from pathlib import Path
 import pandas as pd
 
 from export_pace.config import load_settings
+from export_pace.flow_direction import (
+    FlowDirectionId,
+    flows_location_kwargs,
+    installation_split,
+    parse_flow_direction,
+    to_kpler_flows_direction,
+)
 
 INSTALLATIONS_CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache" / "installations"
 CACHE_TTL_SEC = 7 * 24 * 3600
@@ -32,8 +39,24 @@ def zone_names_from_values(zone_values: list[str] | None) -> list[str]:
     return sorted(set(names))
 
 
-def _cache_key(zones: list[str], products: list[str]) -> str:
-    payload = json.dumps({"zones": zones, "products": sorted(products)}, sort_keys=True)
+def _cache_key(
+    zones: list[str],
+    products: list[str],
+    flow_direction: FlowDirectionId,
+    *,
+    with_intra_country: bool,
+    with_intra_region: bool,
+) -> str:
+    payload = json.dumps(
+        {
+            "zones": zones,
+            "products": sorted(products),
+            "flow_direction": flow_direction,
+            "with_intra_country": with_intra_country,
+            "with_intra_region": with_intra_region,
+        },
+        sort_keys=True,
+    )
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
@@ -78,55 +101,78 @@ def _flows_client():
     return Flows(Configuration(Platform.Liquids, settings.kpler_email, settings.kpler_password))
 
 
-def _installations_from_flows_df(df: pd.DataFrame) -> list[str]:
+def _installations_from_flows_df(df: pd.DataFrame, *, net: bool = False) -> list[str]:
     numeric = df.select_dtypes("number")
     cols = [c for c in numeric.columns if c not in SKIP_COLUMNS]
     if not cols:
         return []
     totals = numeric[cols].sum().sort_values(ascending=False)
+    if net:
+        return [
+            str(name)
+            for name, total in totals.items()
+            if abs(float(total)) >= MIN_FLOW_KB
+        ]
     return [str(name) for name, total in totals.items() if float(total) >= MIN_FLOW_KB]
 
 
-def _fetch_installations_for_zone(zone: str, products: list[str]) -> list[str]:
+def _fetch_installations_for_zone(
+    zone: str,
+    products: list[str],
+    flow_direction: FlowDirectionId,
+    *,
+    with_intra_country: bool,
+    with_intra_region: bool,
+) -> list[str]:
     client = _flows_client()
     if client is None:
         return []
 
-    from kpler.sdk import (
-        FlowsDirection,
-        FlowsMeasurementUnit,
-        FlowsPeriod,
-        FlowsSplit,
-    )
+    from export_pace.locations import LocationSelection
+    from kpler.sdk import FlowsMeasurementUnit, FlowsPeriod
 
     end = date.today()
     start = end - timedelta(days=LOOKBACK_DAYS)
-    df = client.get(
-        flow_direction=[FlowsDirection.Export],
-        split=[FlowsSplit.OriginInstallations],
+    selection = LocationSelection((zone,), ())
+    common = dict(
+        flow_direction=[to_kpler_flows_direction(flow_direction)],
+        split=[installation_split(flow_direction)],
         granularity=[FlowsPeriod.Daily],
-        from_zones=[zone],
         products=products,
         unit=[FlowsMeasurementUnit.KB],
         start_date=start,
         end_date=end,
         with_forecast=False,
         only_realized=True,
+        with_intra_country=with_intra_country,
+        with_intra_region=with_intra_region,
     )
-    return _installations_from_flows_df(df)
+    loc_kw = flows_location_kwargs(flow_direction, selection)[0]
+    df = client.get(**common, **loc_kw)
+    return _installations_from_flows_df(df, net=flow_direction == "net_export")
 
 
 def fetch_installations_catalog(
     zones: list[str],
     products: list[str],
     *,
+    flow_direction: FlowDirectionId | str = "export",
+    with_intra_country: bool = False,
+    with_intra_region: bool = True,
     force_refresh: bool = False,
 ) -> list[str]:
-    """Installations with export flows in the last year for zones + products."""
+    """Installations with flows in the last year for zones + products + direction."""
     if not zones or not products:
         return []
 
-    key = _cache_key(zones, products)
+    direction = parse_flow_direction(flow_direction if isinstance(flow_direction, str) else "export")
+    key = _cache_key(
+        zones,
+        products,
+        direction,
+        with_intra_country=with_intra_country,
+        with_intra_region=with_intra_region,
+    )
     if not force_refresh:
         if key in _MEMORY_CACHE:
             ts, names = _MEMORY_CACHE[key]
@@ -140,14 +186,23 @@ def fetch_installations_catalog(
     merged: list[str] = []
     seen: set[str] = set()
     for zone in zones:
-        for name in _fetch_installations_for_zone(zone, products):
+        for name in _fetch_installations_for_zone(
+            zone,
+            products,
+            direction,
+            with_intra_country=with_intra_country,
+            with_intra_region=with_intra_region,
+        ):
             if name not in seen:
                 seen.add(name)
                 merged.append(name)
 
     _MEMORY_CACHE[key] = (time.time(), merged)
     _write_disk_cache(key, merged)
-    print(f"Cached {len(merged)} installations for zones={zones} products={products}")
+    print(
+        f"Cached {len(merged)} installations for direction={direction} "
+        f"zones={zones} products={products}"
+    )
     return merged
 
 

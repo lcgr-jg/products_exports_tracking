@@ -9,7 +9,18 @@ import numpy as np
 import pandas as pd
 
 from export_pace.config import Settings, load_settings
-from export_pace.locations import LocationSelection, location_label, overlap_warning
+from export_pace.flow_direction import (
+    FlowDirectionId,
+    counterparty_country_split,
+    counterparty_label,
+    flow_direction_label,
+    flows_location_kwargs,
+    installation_split,
+    overlap_warning_for_direction,
+    parse_flow_direction,
+    to_kpler_flows_direction,
+)
+from export_pace.locations import LocationSelection, location_label
 from export_pace.flows_disk_cache import clear_flows_disk_cache, load_flows, save_flows
 from export_pace.transform import (
     build_history_daily_matrix,
@@ -52,6 +63,12 @@ class ViewResult:
     product_series: dict[str, pd.Series]
     heatmap_pct: pd.DataFrame
     anomaly_days: list[int]
+    realized_daily: pd.Series | None
+    flow_direction: FlowDirectionId
+    flow_direction_label: str
+    counterparty_label: str
+    with_intra_country: bool
+    with_intra_region: bool
 
 
 def filter_label(values: list[str], *, sep: str = ", ") -> str:
@@ -112,6 +129,19 @@ class ExportDataService:
             merged = merged.drop(columns=["_other"])
         return merged.sort_values("Date").reset_index(drop=True)
 
+    def _fetch_flows_calls(
+        self,
+        client,
+        *,
+        common: dict,
+        locations: LocationSelection,
+        flow_direction: FlowDirectionId,
+    ) -> list[pd.DataFrame]:
+        loc_calls = flows_location_kwargs(flow_direction, locations)
+        if not loc_calls:
+            return []
+        return [client.get(**common, **loc_kw) for loc_kw in loc_calls]
+
     def _fetch_flows_bulk(
         self,
         *,
@@ -120,27 +150,47 @@ class ExportDataService:
         target_year: int,
         n_history: int,
         live: bool,
+        flow_direction: FlowDirectionId = "export",
         with_forecast_live: bool | None = None,
+        only_realized: bool | None = None,
+        with_intra_country: bool | None = None,
+        with_intra_region: bool | None = None,
     ) -> pd.DataFrame:
         forecast_live = (
             self.settings.with_forecast_live
             if with_forecast_live is None
             else with_forecast_live
         )
+        only_realized_flag = (
+            only_realized
+            if only_realized is not None
+            else (False if live else self.settings.only_realized_hist)
+        )
+        intra_country = (
+            self.settings.with_intra_country
+            if with_intra_country is None
+            else with_intra_country
+        )
+        intra_region = (
+            self.settings.with_intra_region
+            if with_intra_region is None
+            else with_intra_region
+        )
         key = (
             live,
+            flow_direction,
             locations.cache_key,
             products,
             self.settings.unit,
             forecast_live if live else self.settings.with_forecast_hist,
-            False if live else self.settings.only_realized_hist,
-            self.settings.with_intra_country,
+            only_realized_flag,
+            intra_country,
+            intra_region,
         )
         if key in self._bulk_cache:
             return self._bulk_cache[key]
 
         from kpler.sdk import (
-            FlowsDirection,
             FlowsMeasurementUnit,
             FlowsPeriod,
             FlowsSplit,
@@ -151,7 +201,7 @@ class ExportDataService:
             "kbd": FlowsMeasurementUnit.KBD,
         }[self.settings.unit]
         common = dict(
-            flow_direction=[FlowsDirection.Export],
+            flow_direction=[to_kpler_flows_direction(flow_direction)],
             split=[FlowsSplit.Total],
             granularity=[FlowsPeriod.Daily],
             products=list(products),
@@ -159,21 +209,18 @@ class ExportDataService:
             start_date=self._bulk_start_date(target_year, n_history),
             end_date=date.today(),
             with_forecast=forecast_live if live else self.settings.with_forecast_hist,
-            only_realized=False if live else self.settings.only_realized_hist,
-            with_intra_country=self.settings.with_intra_country,
+            only_realized=only_realized_flag,
+            with_intra_country=intra_country,
+            with_intra_region=intra_region,
         )
 
-        # Kpler rejects from_zones and from_installations in the same request.
-        frames: list[pd.DataFrame] = []
+        # Kpler rejects zone + installation location filters in the same request.
         client = self._get_flows_client()
-        if locations.zones:
-            frames.append(client.get(from_zones=list(locations.zones), **common))
-        if locations.installations:
-            frames.append(
-                client.get(from_installations=list(locations.installations), **common)
-            )
+        frames = self._fetch_flows_calls(
+            client, common=common, locations=locations, flow_direction=flow_direction
+        )
 
-        disk_key = ("total", *key)
+        disk_key = ("bulk", *key)
         if not live and self.settings.use_disk_cache:
             cached = load_flows(disk_key)
             if cached is not None:
@@ -222,16 +269,30 @@ class ExportDataService:
         start_date: date,
         end_date: date,
         live: bool,
+        flow_direction: FlowDirectionId = "export",
         with_forecast_live: bool | None = None,
+        with_intra_country: bool | None = None,
+        with_intra_region: bool | None = None,
     ) -> pd.DataFrame:
         forecast_live = (
             self.settings.with_forecast_live
             if with_forecast_live is None
             else with_forecast_live
         )
+        intra_country = (
+            self.settings.with_intra_country
+            if with_intra_country is None
+            else with_intra_country
+        )
+        intra_region = (
+            self.settings.with_intra_region
+            if with_intra_region is None
+            else with_intra_region
+        )
         key = (
             split.name if hasattr(split, "name") else str(split),
             live,
+            flow_direction,
             locations.cache_key,
             products,
             start_date,
@@ -239,7 +300,8 @@ class ExportDataService:
             self.settings.unit,
             forecast_live if live else self.settings.with_forecast_hist,
             False if live else self.settings.only_realized_hist,
-            self.settings.with_intra_country,
+            intra_country,
+            intra_region,
         )
         if key in self._split_cache:
             return self._split_cache[key]
@@ -249,6 +311,7 @@ class ExportDataService:
                 split=split,
                 locations=locations,
                 products=products,
+                flow_direction=flow_direction,
                 start_date=start_date,
                 end_date=end_date,
             )
@@ -256,7 +319,6 @@ class ExportDataService:
             return df
 
         from kpler.sdk import (
-            FlowsDirection,
             FlowsMeasurementUnit,
             FlowsPeriod,
         )
@@ -266,7 +328,7 @@ class ExportDataService:
             "kbd": FlowsMeasurementUnit.KBD,
         }[self.settings.unit]
         common = dict(
-            flow_direction=[FlowsDirection.Export],
+            flow_direction=[to_kpler_flows_direction(flow_direction)],
             split=[split],
             granularity=[FlowsPeriod.Daily],
             products=list(products),
@@ -275,20 +337,26 @@ class ExportDataService:
             end_date=end_date,
             with_forecast=forecast_live if live else self.settings.with_forecast_hist,
             only_realized=False if live else self.settings.only_realized_hist,
-            with_intra_country=self.settings.with_intra_country,
+            with_intra_country=intra_country,
+            with_intra_region=intra_region,
         )
 
-        frames: list[pd.DataFrame] = []
         client = self._get_flows_client()
-        if locations.zones:
-            frames.append(client.get(from_zones=list(locations.zones), **common))
-        if locations.installations:
-            frames.append(
-                client.get(from_installations=list(locations.installations), **common)
-            )
+        frames = self._fetch_flows_calls(
+            client, common=common, locations=locations, flow_direction=flow_direction
+        )
+
+        disk_key = ("split", *key)
+        if not live and self.settings.use_disk_cache:
+            cached = load_flows(disk_key)
+            if cached is not None:
+                self._split_cache[key] = cached
+                return cached
 
         df = self._merge_wide_flow_frames(frames)
         self._split_cache[key] = df
+        if not live and self.settings.use_disk_cache:
+            save_flows(disk_key, df)
         return df
 
     def _mock_split_flows(
@@ -297,24 +365,29 @@ class ExportDataService:
         split,
         locations: LocationSelection,
         products: tuple[str, ...],
+        flow_direction: FlowDirectionId = "export",
         start_date: date,
         end_date: date,
     ) -> pd.DataFrame:
         from kpler.sdk import FlowsSplit
 
         idx = pd.date_range(start_date, end_date, freq="D")
-        seed = hash((locations.cache_key, products, split)) % (2**31)
+        seed = hash((locations.cache_key, products, split, flow_direction)) % (2**31)
         rng = np.random.default_rng(seed)
         n = len(idx)
 
-        if split == FlowsSplit.DestinationCountries:
-            labels = ["Singapore Republic", "South Africa", "India", "United Arab Emirates", "Unknown"]
+        if split in (FlowsSplit.DestinationCountries, FlowsSplit.OriginCountries):
+            labels = ["Singapore Republic", "South Africa", "Saudi Arabia", "United States", "Unknown"]
         else:
-            labels = list(locations.installations) or [
-                "Jamnagar Refinery",
-                "Vadinar Refinery",
-                "New Mangalore Refinery",
-            ]
+            labels = list(locations.installations) or (
+                ["Impala Terminal Rotterdam", "Vesta Antwerp", "Evos Hamburg"]
+                if flow_direction == "import"
+                else [
+                    "Jamnagar Refinery",
+                    "Vadinar Refinery",
+                    "New Mangalore Refinery",
+                ]
+            )
 
         data = {"Date": idx}
         for label in labels:
@@ -351,26 +424,33 @@ class ExportDataService:
         year: int,
         month: int,
         as_of: date | None,
+        flow_direction: FlowDirectionId = "export",
         with_forecast_live: bool | None = None,
+        with_intra_country: bool | None = None,
+        with_intra_region: bool | None = None,
     ) -> pd.Series:
-        from kpler.sdk import FlowsSplit
-
         start = date(year, month, 1)
         end = as_of or date(year, month, calendar.monthrange(year, month)[1])
         df = self._fetch_flows_split(
-            split=FlowsSplit.DestinationCountries,
+            split=counterparty_country_split(flow_direction),
             locations=locations,
             products=products,
             start_date=start,
             end_date=end,
             live=True,
+            flow_direction=flow_direction,
             with_forecast_live=with_forecast_live,
+            with_intra_country=with_intra_country,
+            with_intra_region=with_intra_region,
         )
         daily = self._split_df_to_month_matrix(df, year, month, as_of=as_of)
         if daily.empty:
             return pd.Series(dtype=float)
         totals = daily.sum(axis=0).sort_values(ascending=False)
-        totals = totals[totals > 0]
+        if flow_direction == "net_export":
+            totals = totals[totals != 0].reindex(totals.abs().sort_values(ascending=False).index)
+        else:
+            totals = totals[totals > 0]
         return totals
 
     def get_origin_daily_breakdown(
@@ -381,23 +461,28 @@ class ExportDataService:
         year: int,
         month: int,
         as_of: date | None,
+        flow_direction: FlowDirectionId = "export",
         with_forecast_live: bool | None = None,
+        with_intra_country: bool | None = None,
+        with_intra_region: bool | None = None,
     ) -> pd.DataFrame | None:
-        """Daily exports by origin installation — only when a single zone is selected."""
+        """Daily flows by installation — only when a single zone is selected."""
         if len(locations.zones) != 1 or locations.installations:
             return None
-        from kpler.sdk import FlowsSplit
 
         start = date(year, month, 1)
         end = as_of or date(year, month, calendar.monthrange(year, month)[1])
         df = self._fetch_flows_split(
-            split=FlowsSplit.OriginInstallations,
+            split=installation_split(flow_direction),
             locations=locations,
             products=products,
             start_date=start,
             end_date=end,
             live=True,
+            flow_direction=flow_direction,
             with_forecast_live=with_forecast_live,
+            with_intra_country=with_intra_country,
+            with_intra_region=with_intra_region,
         )
         daily = self._split_df_to_month_matrix(df, year, month, as_of=as_of)
         if daily.empty:
@@ -414,7 +499,10 @@ class ExportDataService:
         target_year: int,
         n_history: int,
         as_of: date | None,
+        flow_direction: FlowDirectionId = "export",
         with_forecast_live: bool | None = None,
+        with_intra_country: bool | None = None,
+        with_intra_region: bool | None = None,
     ) -> dict[str, pd.Series]:
         """Per-zone / per-installation cumulative MTD curves for the selected month."""
         labels: list[tuple[str, LocationSelection]] = []
@@ -435,7 +523,10 @@ class ExportDataService:
                 target_year=target_year,
                 n_history=n_history,
                 live=True,
+                flow_direction=flow_direction,
                 with_forecast_live=with_forecast_live,
+                with_intra_country=with_intra_country,
+                with_intra_region=with_intra_region,
             )
             if as_of is not None:
                 live_daily = live_daily[live_daily.index.date <= as_of]
@@ -453,7 +544,10 @@ class ExportDataService:
         target_year: int,
         n_history: int,
         as_of: date | None,
+        flow_direction: FlowDirectionId = "export",
         with_forecast_live: bool | None = None,
+        with_intra_country: bool | None = None,
+        with_intra_region: bool | None = None,
     ) -> dict[str, pd.Series]:
         """Per-product cumulative MTD curves when multiple products are selected."""
         if len(products) < 2:
@@ -468,7 +562,10 @@ class ExportDataService:
                 target_year=target_year,
                 n_history=n_history,
                 live=True,
+                flow_direction=flow_direction,
                 with_forecast_live=with_forecast_live,
+                with_intra_country=with_intra_country,
+                with_intra_region=with_intra_region,
             )
             if as_of is not None:
                 live_daily = live_daily[live_daily.index.date <= as_of]
@@ -493,15 +590,17 @@ class ExportDataService:
         *,
         locations: LocationSelection,
         products: tuple[str, ...],
+        flow_direction: FlowDirectionId = "export",
         base: float = 600.0,
         seed: int = 0,
     ) -> pd.Series:
-        filter_seed = hash((locations.cache_key, products)) % (2**31)
+        direction_scale = {"export": 1.0, "import": 0.65, "net_export": 0.35}
+        filter_seed = hash((locations.cache_key, products, flow_direction)) % (2**31)
         rng = np.random.default_rng(seed + filter_seed + year * 100 + month)
         n = calendar.monthrange(year, month)[1]
         trend = 1.0 + 0.03 * (year - 2020)
         seasonal = 1.0 + 0.12 * np.sin((month - 1) / 12 * 2 * np.pi)
-        mean_daily = base * trend * seasonal
+        mean_daily = base * trend * seasonal * direction_scale.get(flow_direction, 1.0)
         cargo = 380.0
         daily = rng.poisson(1.6, n) * cargo * rng.uniform(0.6, 1.4, n)
         daily = daily * (mean_daily / max(daily.mean(), 1e-9))
@@ -518,28 +617,57 @@ class ExportDataService:
         target_year: int,
         n_history: int,
         live: bool = False,
+        flow_direction: FlowDirectionId = "export",
         with_forecast_live: bool | None = None,
+        only_realized: bool | None = None,
+        with_intra_country: bool | None = None,
+        with_intra_region: bool | None = None,
     ) -> pd.Series:
         forecast_live = (
             self.settings.with_forecast_live
             if with_forecast_live is None
             else with_forecast_live
         )
+        only_realized_flag = (
+            only_realized
+            if only_realized is not None
+            else (False if live else self.settings.only_realized_hist)
+        )
+        intra_country = (
+            self.settings.with_intra_country
+            if with_intra_country is None
+            else with_intra_country
+        )
+        intra_region = (
+            self.settings.with_intra_region
+            if with_intra_region is None
+            else with_intra_region
+        )
         key = (
             year,
             month,
             live,
+            flow_direction,
             locations.cache_key,
             products,
             target_year,
             n_history,
             forecast_live if live else self.settings.with_forecast_hist,
+            only_realized_flag,
+            intra_country,
+            intra_region,
         )
         if key in self._daily_cache:
             return self._daily_cache[key]
 
         if self.settings.use_mock:
-            series = self._mock_export_daily(year, month, locations=locations, products=products)
+            series = self._mock_export_daily(
+                year,
+                month,
+                locations=locations,
+                products=products,
+                flow_direction=flow_direction,
+            )
         else:
             df = self._fetch_flows_bulk(
                 locations=locations,
@@ -547,7 +675,11 @@ class ExportDataService:
                 target_year=target_year,
                 n_history=n_history,
                 live=live,
+                flow_direction=flow_direction,
                 with_forecast_live=with_forecast_live,
+                only_realized=only_realized,
+                with_intra_country=intra_country,
+                with_intra_region=intra_region,
             )
             series = self._flows_df_to_daily(df, year, month)
 
@@ -573,6 +705,9 @@ class ExportDataService:
         with_forecast_live: bool | None = None,
         compare_locations: bool = False,
         compare_products: bool = False,
+        flow_direction: FlowDirectionId | str = "export",
+        with_intra_country: bool | None = None,
+        with_intra_region: bool | None = None,
     ) -> ViewResult:
         if locations.is_empty:
             raise ValueError("Select at least one zone or installation")
@@ -581,6 +716,17 @@ class ExportDataService:
 
         n_history = n_history if n_history is not None else self.settings.n_history
         product_tuple = tuple(products)
+        direction = parse_flow_direction(flow_direction if isinstance(flow_direction, str) else "export")
+        intra_country = (
+            self.settings.with_intra_country
+            if with_intra_country is None
+            else with_intra_country
+        )
+        intra_region = (
+            self.settings.with_intra_region
+            if with_intra_region is None
+            else with_intra_region
+        )
         as_of, is_live_month, days_in_month = resolve_as_of(target_year, month, as_of_day)
 
         get_daily: Callable[[int, int], pd.Series] = lambda y, m: self.get_export_daily(
@@ -591,7 +737,10 @@ class ExportDataService:
             target_year=target_year,
             n_history=n_history,
             live=False,
+            flow_direction=direction,
             with_forecast_live=with_forecast_live,
+            with_intra_country=intra_country,
+            with_intra_region=intra_region,
         )
 
         hist_years = list(range(target_year - n_history, target_year))
@@ -607,7 +756,10 @@ class ExportDataService:
             target_year=target_year,
             n_history=n_history,
             live=True,
+            flow_direction=direction,
             with_forecast_live=with_forecast_live,
+            with_intra_country=intra_country,
+            with_intra_region=intra_region,
         )
         if as_of is not None:
             live_daily = live_daily[live_daily.index.date <= as_of]
@@ -615,6 +767,28 @@ class ExportDataService:
         current = to_dom_cumulative(live_daily)
         current_daily = live_daily.copy()
         current_daily.index = current_daily.index.day
+        realized_daily_dom: pd.Series | None = None
+        if is_live_month and with_forecast_live:
+            realized_live = self.get_export_daily(
+                target_year,
+                month,
+                locations=locations,
+                products=product_tuple,
+                target_year=target_year,
+                n_history=n_history,
+                live=True,
+                flow_direction=direction,
+                with_forecast_live=False,
+                only_realized=True,
+                with_intra_country=intra_country,
+                with_intra_region=intra_region,
+            )
+            if as_of is not None:
+                realized_live = realized_live[realized_live.index.date <= as_of]
+            if not realized_live.empty:
+                realized_daily_dom = realized_live.copy()
+                realized_daily_dom.index = realized_daily_dom.index.day
+
         latest_data_day = (
             live_daily.index[-1].date() if not live_daily.empty else None
         )
@@ -637,7 +811,10 @@ class ExportDataService:
             year=target_year,
             month=month,
             as_of=as_of,
+            flow_direction=direction,
             with_forecast_live=with_forecast_live,
+            with_intra_country=intra_country,
+            with_intra_region=intra_region,
         )
         origin_daily = self.get_origin_daily_breakdown(
             locations=locations,
@@ -645,7 +822,10 @@ class ExportDataService:
             year=target_year,
             month=month,
             as_of=as_of,
+            flow_direction=direction,
             with_forecast_live=with_forecast_live,
+            with_intra_country=intra_country,
+            with_intra_region=intra_region,
         )
         origin_cumulative = origin_daily.cumsum() if origin_daily is not None else None
 
@@ -659,7 +839,10 @@ class ExportDataService:
                 target_year=target_year,
                 n_history=n_history,
                 as_of=as_of,
+                flow_direction=direction,
                 with_forecast_live=with_forecast_live,
+                with_intra_country=intra_country,
+                with_intra_region=intra_region,
             )
 
         product_series: dict[str, pd.Series] = {}
@@ -672,11 +855,25 @@ class ExportDataService:
                 target_year=target_year,
                 n_history=n_history,
                 as_of=as_of,
+                flow_direction=direction,
                 with_forecast_live=with_forecast_live,
+                with_intra_country=intra_country,
+                with_intra_region=intra_region,
             )
 
-        heatmap_pct = build_pace_heatmap(hist, current, target_year, days_in_month)
-        anomaly_days = detect_anomaly_days(current_daily, hist_daily)
+        signed_metrics = direction == "net_export"
+        heatmap_pct = build_pace_heatmap(
+            hist,
+            current,
+            target_year,
+            days_in_month,
+            signed=signed_metrics,
+        )
+        anomaly_days = detect_anomaly_days(
+            current_daily,
+            hist_daily,
+            signed=signed_metrics,
+        )
 
         return ViewResult(
             current=current,
@@ -695,7 +892,7 @@ class ExportDataService:
             is_live_month=is_live_month,
             days_in_month=days_in_month,
             use_mock=self.settings.use_mock,
-            warning=overlap_warning(locations),
+            warning=overlap_warning_for_direction(locations, direction),
             hist_by_year=hist,
             percentile_rank=pct_rank,
             destinations_mtd=destinations_mtd,
@@ -705,6 +902,12 @@ class ExportDataService:
             product_series=product_series,
             heatmap_pct=heatmap_pct,
             anomaly_days=anomaly_days,
+            realized_daily=realized_daily_dom,
+            flow_direction=direction,
+            flow_direction_label=flow_direction_label(direction),
+            counterparty_label=counterparty_label(direction),
+            with_intra_country=intra_country,
+            with_intra_region=intra_region,
         )
 
 

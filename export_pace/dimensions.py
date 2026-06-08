@@ -6,6 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from export_pace.config import load_settings
+from export_pace.flow_direction import FlowDirectionId, parse_flow_direction
 from export_pace.installations_catalog import (
     fetch_installations_catalog,
     installation_options_from_names,
@@ -267,11 +268,14 @@ def get_dynamic_installation_options(
     search_value: str | None,
     selected_values: list[str] | None,
     *,
+    flow_direction: FlowDirectionId | str = "export",
+    with_intra_country: bool = False,
+    with_intra_region: bool = True,
     force_refresh: bool = False,
 ) -> list[dict]:
     """
     Installations dropdown:
-    - Default: Kpler Flows OriginInstallations catalog for selected zones + products
+    - Default: Kpler Flows installation catalog for selected zones + products + direction
     - While typing (2+ chars): zone search + exact-name fallback
     """
     selected = _installation_only(selected_values)
@@ -284,7 +288,14 @@ def get_dynamic_installation_options(
     zones = zone_names_from_values(zone_values)
     products = [p for p in as_filter_list(product_values) if isinstance(p, str) and p]
     if zones and products:
-        names = fetch_installations_catalog(zones, products, force_refresh=force_refresh)
+        names = fetch_installations_catalog(
+            zones,
+            products,
+            flow_direction=parse_flow_direction(flow_direction),
+            with_intra_country=with_intra_country,
+            with_intra_region=with_intra_region,
+            force_refresh=force_refresh,
+        )
         catalog_opts = installation_options_from_names(names)
     else:
         catalog_opts = list(PRESET_INSTALLATION_OPTIONS)

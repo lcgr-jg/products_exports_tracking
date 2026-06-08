@@ -9,6 +9,7 @@ from dash import html
 import dash_bootstrap_components as dbc
 
 from export_pace.data import ViewResult
+from export_pace.flow_direction import installation_role_label
 
 
 @dataclass(frozen=True)
@@ -157,9 +158,9 @@ def make_figure(view: ViewResult, opts: FigureOptions | None = None) -> go.Figur
     if view.as_of is not None:
         as_of_note = f" — view as of {view.as_of.strftime('%d %b %Y')}"
 
-    fig.update_layout(
+    layout_kwargs = dict(
         title=(
-            f"Cumulative {view.product_label} exports — {view.location_label} — "
+            f"Cumulative {view.product_label} {view.flow_direction_label} — {view.location_label} — "
             f"{month_name} {view.target_year}{as_of_note}"
             + ("  (MOCK DATA)" if view.use_mock else "")
         ),
@@ -171,6 +172,10 @@ def make_figure(view: ViewResult, opts: FigureOptions | None = None) -> go.Figur
         height=480,
         margin=dict(b=90),
     )
+    if view.flow_direction == "net_export":
+        fig.add_hline(y=0, line_dash="dash", line_color="#888", line_width=1)
+        layout_kwargs["yaxis"] = dict(zeroline=True, zerolinecolor="#888")
+    fig.update_layout(**layout_kwargs)
     return fig
 
 
@@ -178,19 +183,29 @@ def make_destination_figure(view: ViewResult, *, top_n: int = 10) -> go.Figure |
     if view.destinations_mtd.empty:
         return None
     month_name = calendar.month_name[view.month]
-    top = view.destinations_mtd.head(top_n).sort_values()
+    top = view.destinations_mtd.head(top_n)
+    if view.flow_direction == "net_export":
+        top = top.reindex(top.abs().sort_values(ascending=False).index).head(top_n)
+    top = top.sort_values()
+    colors = [
+        "#e6550d" if v < 0 else "#6baed6"
+        for v in top.values
+    ]
     fig = go.Figure(
         go.Bar(
             x=top.values,
             y=top.index,
             orientation="h",
-            marker_color="#6baed6",
+            marker_color=colors,
             text=[f"{v:,.0f}" for v in top.values],
             textposition="outside",
         )
     )
     fig.update_layout(
-        title=f"Top destinations — {view.product_label} exports MTD — {month_name} {view.target_year}",
+        title=(
+            f"Top {view.counterparty_label} — {view.product_label} "
+            f"{view.flow_direction_label} MTD — {month_name} {view.target_year}"
+        ),
         xaxis_title=f"MTD {view.unit}",
         yaxis_title="",
         template="plotly_white",
@@ -215,28 +230,33 @@ def _installation_palette() -> list[str]:
 
 
 def make_origin_cumulative_figure(view: ViewResult) -> go.Figure | None:
-    """Stacked area of cumulative MTD exports by origin installation (Kpler-style)."""
+    """Cumulative MTD by installation — stacked area (exports/imports) or lines (net)."""
     if view.origin_cumulative is None or view.origin_cumulative.empty:
         return None
     month_name = calendar.month_name[view.month]
+    role = installation_role_label(view.flow_direction)
+    use_stacked = view.flow_direction != "net_export" and (view.origin_cumulative >= 0).all().all()
     fig = go.Figure()
     palette = _installation_palette()
     for i, col in enumerate(view.origin_cumulative.columns):
-        fig.add_trace(
-            go.Scatter(
-                x=view.origin_cumulative.index,
-                y=view.origin_cumulative[col],
-                name=col,
-                stackgroup="installations",
-                mode="lines",
-                line=dict(width=0.5, color=palette[i % len(palette)]),
-                fillcolor=palette[i % len(palette)],
-            )
+        trace_kwargs = dict(
+            x=view.origin_cumulative.index,
+            y=view.origin_cumulative[col],
+            name=col,
+            mode="lines",
+            line=dict(
+                width=2 if not use_stacked else 0.5,
+                color=palette[i % len(palette)],
+            ),
         )
+        if use_stacked:
+            trace_kwargs["stackgroup"] = "installations"
+            trace_kwargs["fillcolor"] = palette[i % len(palette)]
+        fig.add_trace(go.Scatter(**trace_kwargs))
     fig.update_layout(
         title=(
-            f"Cumulative MTD by installation — {view.location_label} — "
-            f"{month_name} {view.target_year}"
+            f"Cumulative MTD by {role} — {view.location_label} — "
+            f"{view.flow_direction_label} — {month_name} {view.target_year}"
         ),
         xaxis_title="Day of month",
         yaxis_title=f"Cumulative {view.unit} (MTD)",
@@ -254,20 +274,39 @@ def make_heatmap_figure(view: ViewResult) -> go.Figure | None:
         return None
     month_name = calendar.month_name[view.month]
     z = view.heatmap_pct.values
+    signed = view.flow_direction == "net_export"
+    if signed:
+        zlim = max(float(abs(z).max()), 1.0)
+        heatmap_kwargs = dict(
+            colorscale="RdBu",
+            zmin=-zlim,
+            zmax=zlim,
+            zmid=0,
+            colorbar=dict(title="Signed %"),
+        )
+        pace_note = " (signed % of month)"
+    else:
+        heatmap_kwargs = dict(
+            colorscale="Blues",
+            zmin=0,
+            zmax=100,
+            colorbar=dict(title="% of month"),
+        )
+        pace_note = ""
     fig = go.Figure(
         go.Heatmap(
             z=z,
             x=view.heatmap_pct.columns,
             y=[str(y) for y in view.heatmap_pct.index],
-            colorscale="Blues",
-            zmin=0,
-            zmax=100,
-            colorbar=dict(title="% of month"),
-            hovertemplate="Year %{y}<br>Day %{x}<br>%{z:.0f}% of month total<extra></extra>",
+            hovertemplate="Year %{y}<br>Day %{x}<br>%{z:.0f}%<extra></extra>",
+            **heatmap_kwargs,
         )
     )
     fig.update_layout(
-        title=f"Month pacing heatmap — {month_name} — {view.location_label}",
+        title=(
+            f"Month pacing heatmap — {view.flow_direction_label} — "
+            f"{month_name} — {view.location_label}{pace_note}"
+        ),
         xaxis_title="Day of month",
         yaxis_title="Year",
         template="plotly_white",
@@ -282,32 +321,68 @@ def make_daily_figure(view: ViewResult, opts: FigureOptions | None = None) -> go
     month_name = calendar.month_name[view.month]
     unit_label = "kb" if view.unit == "kb" else "kbd"
     anomaly_set = set(view.anomaly_days) if opts.show_anomalies else set()
-    colors = [
-        "#e6550d" if day in anomaly_set else "#6baed6"
-        for day in view.current_daily.index
-    ]
+    signed = view.flow_direction == "net_export"
 
-    fig = go.Figure(
-        go.Bar(
-            x=view.current_daily.index,
-            y=view.current_daily.values,
-            name="Daily exports",
-            marker_color=colors,
+    def _bar_color(day: int, value: float) -> str:
+        if day in anomaly_set:
+            return "#e6550d"
+        if signed and value < 0:
+            return "#9e9ac8"
+        return "#6baed6"
+
+    fig = go.Figure()
+    if view.realized_daily is not None:
+        aligned_realized = view.realized_daily.reindex(view.current_daily.index).fillna(0)
+        forecast_inc = (view.current_daily - aligned_realized).clip(lower=0)
+        fig.add_trace(
+            go.Bar(
+                x=view.current_daily.index,
+                y=aligned_realized.values,
+                name="Realized",
+                marker_color="#6baed6",
+            )
         )
-    )
+        fig.add_trace(
+            go.Bar(
+                x=view.current_daily.index,
+                y=forecast_inc.values,
+                name="Kpler forecast",
+                marker_color="#fd8d3c",
+            )
+        )
+        fig.update_layout(barmode="stack")
+    else:
+        fig.add_trace(
+            go.Bar(
+                x=view.current_daily.index,
+                y=view.current_daily.values,
+                name="Daily flows",
+                marker_color=[
+                    _bar_color(int(day), float(val))
+                    for day, val in view.current_daily.items()
+                ],
+            )
+        )
+
     anomaly_note = ""
     if anomaly_set:
-        anomaly_note = f" — {len(anomaly_set)} high-volume day(s) flagged (>2σ vs history)"
+        tail = ">2σ vs history" if not signed else ">2σ vs history (either direction)"
+        anomaly_note = f" — {len(anomaly_set)} unusual day(s) flagged ({tail})"
+    if view.realized_daily is not None:
+        anomaly_note += " — stacked: realized + forecast"
 
     fig.update_layout(
-        title=f"Daily {view.product_label} exports — {month_name} {view.target_year}{anomaly_note}",
+        title=(
+            f"Daily {view.product_label} {view.flow_direction_label} — "
+            f"{month_name} {view.target_year}{anomaly_note}"
+        ),
         xaxis_title="Day of month",
         yaxis_title=f"{unit_label} / day",
         xaxis=dict(range=[0.5, 31.5], dtick=2),
         template="plotly_white",
         height=280,
         margin=dict(t=50, b=50),
-        showlegend=False,
+        showlegend=view.realized_daily is not None,
     )
     return fig
 
@@ -324,6 +399,11 @@ def make_data_status_line(view: ViewResult, *, refreshed_at: datetime | None = N
         parts.append("MOCK data")
     if view.anomaly_days:
         parts.append(f"Anomaly days: {', '.join(str(d) for d in view.anomaly_days)}")
+    parts.append(
+        "Intra-country: "
+        f"{'on' if view.with_intra_country else 'off'} · "
+        f"Intra-region: {'on' if view.with_intra_region else 'off'}"
+    )
     if not parts:
         parts.append("No flow data in range")
     return html.Div(
@@ -367,12 +447,19 @@ def make_kpi_strip(view: ViewResult) -> list:
     pct = view.percentile_rank
     pct_text = f"{pct:.0f}th" if pct is not None and pct == pct else "—"
     pct_sub = f"vs {view.n_history} prior {calendar.month_name[view.month]}s" if pct is not None else ""
+    mtd_sub = ""
+    if view.flow_direction == "net_export" and mtd == mtd:
+        mtd_sub = "positive = net exporter" if mtd >= 0 else "negative = net importer"
+    proj_sub = "MTD / days elapsed × days in month"
+    if view.flow_direction == "net_export":
+        proj_sub += " (signed)"
 
     return dbc.Row(
         [
             kpi_card(
-                f"MTD exports (day {dom})",
+                f"MTD {view.flow_direction_label} (day {dom})",
                 f"{mtd:,.0f} {view.unit}" if mtd == mtd else "—",
+                mtd_sub,
             ),
             kpi_card("Historical percentile", pct_text, pct_sub),
             kpi_card(
@@ -388,7 +475,7 @@ def make_kpi_strip(view: ViewResult) -> list:
             kpi_card(
                 "Run-rate month-end (proj.)",
                 f"{projected_eom:,.0f} {view.unit}" if projected_eom == projected_eom else "—",
-                "MTD / days elapsed × days in month",
+                proj_sub,
             ),
         ],
         className="g-3 mb-3",

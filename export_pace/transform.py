@@ -55,19 +55,27 @@ def build_pace_heatmap(
     current: pd.Series,
     target_year: int,
     days_in_month: int,
+    *,
+    signed: bool = False,
 ) -> pd.DataFrame:
-    """Years × day-of-month matrix: cumulative exports as % of that year's month total."""
+    """Years × day-of-month matrix: cumulative flows as % of that year's month total."""
     combined = hist_cumulative.copy()
     combined[target_year] = current
     rows: dict[int, pd.Series] = {}
     dom_index = list(range(1, days_in_month + 1))
     for year in sorted(combined.columns):
         series = combined[year].reindex(dom_index).ffill().fillna(0)
-        last_dom = int(series[series > 0].index.max()) if (series > 0).any() else days_in_month
+        if signed:
+            nonzero = series[series != 0]
+            last_dom = int(nonzero.index.max()) if not nonzero.empty else days_in_month
+        else:
+            last_dom = int(series[series > 0].index.max()) if (series > 0).any() else days_in_month
         eom = float(series.loc[last_dom]) if last_dom in series.index else float(series.max())
-        if eom <= 0:
-            eom = 1.0
-        rows[year] = (series / eom * 100).clip(0, 100)
+        denom = abs(eom) if signed else (eom if eom > 0 else 1.0)
+        if denom <= 0:
+            denom = 1.0
+        pct = series / denom * 100
+        rows[year] = pct if signed else pct.clip(0, 100)
     return pd.DataFrame(rows).T
 
 
@@ -76,8 +84,9 @@ def detect_anomaly_days(
     hist_daily: pd.DataFrame,
     *,
     sigma: float = 2.0,
+    signed: bool = False,
 ) -> list[int]:
-    """Days where current daily volume exceeds historical same-DOM median + sigma × std."""
+    """Flag unusual daily volumes vs historical same-DOM distribution."""
     flagged: list[int] = []
     for day, value in current_daily.items():
         if day not in hist_daily.index or value != value:
@@ -89,7 +98,11 @@ def detect_anomaly_days(
         std = float(ref.std())
         if std <= 0:
             continue
-        if value > med + sigma * std:
+        if signed:
+            unusual = abs(value - med) > sigma * std
+        else:
+            unusual = value > med + sigma * std
+        if unusual:
             flagged.append(int(day))
     return sorted(flagged)
 

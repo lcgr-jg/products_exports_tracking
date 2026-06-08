@@ -80,6 +80,42 @@ Type 2+ characters to live-search ports, refineries, and anything else (`Yanbu`,
 
 Zone catalog is cached for a week in `.cache/kpler_zones.json`.
 
+## Flow scope toggles
+
+Under **Flow scope** in the filter panel:
+
+- **Include intra-country flows** — Kpler `with_intra_country` (within-country cargo movements)
+- **Include intra-region flows** — Kpler `with_intra_region` (within-region cargo movements)
+
+Defaults: **intra-country off**, **intra-region on**. The status line above the charts shows the active setting.
+
+## Flow direction (Phase A)
+
+Use **Flow direction** at the top of the filter panel:
+
+| Mode | What it measures | Kpler filter |
+|------|------------------|--------------|
+| **Exports** | Cargo leaving the selected geography | `from_zones` / `from_installations` |
+| **Imports** | Cargo arriving **into** the selected country/region | `to_zones` / `to_installations` |
+| **Net exports** | Export minus import balance for the selected geography | `from_zones` + `NetExport` |
+
+Main MTD chart, daily chart, KPIs, heatmap, compare modes, and breakdown charts all respect the selected direction.
+
+### Phase B — breakdown charts & installations
+
+| Direction | Country/region bar chart | Installation chart | Installations dropdown |
+|-----------|--------------------------|--------------------|-------------------------|
+| **Exports** | Top **destinations** (`DestinationCountries`) | Cumulative by **origin** refinery | `OriginInstallations` |
+| **Imports** | Top **origins** — where cargo comes from (`OriginCountries`) | Cumulative by **destination** terminal | `DestinationInstallations` |
+| **Net exports** | Top **destinations** (signed volumes) | Per-installation lines (signed net) | `OriginInstallations` |
+
+### Phase C — signed flows, forecast & cache polish
+
+- **Net export UX** — zero baseline on MTD chart, signed heatmap (red/blue), purple daily bars for net-import days, bidirectional anomaly flags
+- **Forecast vs realized** — when **Include Kpler forecast** is on for the live month, daily chart stacks realized (blue) + forecast increment (orange)
+- **Split-flow disk cache** — destination/origin/installation API pulls cached in `.cache/flows/` (same as bulk history)
+- **Installations reset** — changing flow direction clears selected facilities (catalog is direction-specific)
+
 ## v3 features (analytics)
 
 - **Cumulative MTD by installation** — stacked area chart (replaces daily stacked bars) when one zone is selected
@@ -107,7 +143,7 @@ Zone catalog is cached for a week in `.cache/kpler_zones.json`.
 
 ### Installations dropdown
 
-When you pick zones (e.g. West Coast India) and a product (e.g. Diesel), the app queries Kpler Flows with `split=OriginInstallations` over the last year and lists facilities that actually exported that product. Change zones or product to refresh the list. Use **Refresh live data** to force a re-pull.
+When you pick zones (e.g. West Coast India) and a product (e.g. Diesel), the app queries Kpler Flows over the last year and lists facilities with flows for that direction — export origins, import destination terminals, or net installations. Change zones, product, or **flow direction** to refresh the list. Use **Refresh live data** to force a re-pull.
 
 ## Layout
 
