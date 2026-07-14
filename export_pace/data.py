@@ -20,6 +20,10 @@ from export_pace.flow_direction import (
     parse_flow_direction,
     to_kpler_flows_direction,
 )
+from export_pace.unknown_trades import (
+    UnknownTradeStatusBreakdown,
+    fetch_unknown_trade_status_breakdown,
+)
 from export_pace.locations import LocationSelection, location_label
 from export_pace.flows_disk_cache import clear_flows_disk_cache, load_flows, save_flows
 from export_pace.transform import (
@@ -57,6 +61,7 @@ class ViewResult:
     hist_by_year: pd.DataFrame
     percentile_rank: float | None
     destinations_mtd: pd.Series
+    unknown_trade_status: UnknownTradeStatusBreakdown | None
     origin_daily: pd.DataFrame | None
     origin_cumulative: pd.DataFrame | None
     location_series: dict[str, pd.Series]
@@ -86,6 +91,7 @@ class ExportDataService:
         self._bulk_cache: dict[tuple, pd.DataFrame] = {}
         self._daily_cache: dict[tuple, pd.Series] = {}
         self._split_cache: dict[tuple, pd.DataFrame] = {}
+        self._trades_cache: dict[tuple, pd.DataFrame] = {}
 
     def _get_flows_client(self):
         if self._flows_client is None:
@@ -378,8 +384,12 @@ class ExportDataService:
 
         if split in (FlowsSplit.DestinationCountries, FlowsSplit.OriginCountries):
             labels = ["Singapore Republic", "South Africa", "Saudi Arabia", "United States", "Unknown"]
-        else:
-            labels = list(locations.installations) or (
+            data = {"Date": idx}
+            for label in labels:
+                data[label] = rng.uniform(50, 250, n) * (1 + 0.1 * rng.random(n))
+            return pd.DataFrame(data)
+
+        labels = list(locations.installations) or (
                 ["Impala Terminal Rotterdam", "Vesta Antwerp", "Evos Hamburg"]
                 if flow_direction == "import"
                 else [
@@ -416,9 +426,10 @@ class ExportDataService:
         daily.index = daily.index.day
         return daily.sort_index()
 
-    def get_destinations_mtd(
+    def _counterparty_mtd_totals(
         self,
         *,
+        split,
         locations: LocationSelection,
         products: tuple[str, ...],
         year: int,
@@ -432,7 +443,7 @@ class ExportDataService:
         start = date(year, month, 1)
         end = as_of or date(year, month, calendar.monthrange(year, month)[1])
         df = self._fetch_flows_split(
-            split=counterparty_country_split(flow_direction),
+            split=split,
             locations=locations,
             products=products,
             start_date=start,
@@ -452,6 +463,61 @@ class ExportDataService:
         else:
             totals = totals[totals > 0]
         return totals
+
+    def get_destinations_mtd(
+        self,
+        *,
+        locations: LocationSelection,
+        products: tuple[str, ...],
+        year: int,
+        month: int,
+        as_of: date | None,
+        flow_direction: FlowDirectionId = "export",
+        with_forecast_live: bool | None = None,
+        with_intra_country: bool | None = None,
+        with_intra_region: bool | None = None,
+    ) -> pd.Series:
+        return self._counterparty_mtd_totals(
+            split=counterparty_country_split(flow_direction),
+            locations=locations,
+            products=products,
+            year=year,
+            month=month,
+            as_of=as_of,
+            flow_direction=flow_direction,
+            with_forecast_live=with_forecast_live,
+            with_intra_country=with_intra_country,
+            with_intra_region=with_intra_region,
+        )
+
+    def get_unknown_trade_status(
+        self,
+        *,
+        locations: LocationSelection,
+        products: tuple[str, ...],
+        year: int,
+        month: int,
+        as_of: date | None,
+        flow_direction: FlowDirectionId = "export",
+        with_forecast_live: bool | None = None,
+        with_intra_country: bool | None = None,
+        with_intra_region: bool | None = None,
+        country_totals: pd.Series | None = None,
+    ) -> UnknownTradeStatusBreakdown | None:
+        return fetch_unknown_trade_status_breakdown(
+            locations=locations,
+            products=products,
+            year=year,
+            month=month,
+            as_of=as_of,
+            flow_direction=flow_direction,
+            with_forecast_live=with_forecast_live,
+            with_intra_country=with_intra_country,
+            with_intra_region=with_intra_region,
+            country_totals=country_totals,
+            settings=self.settings,
+            trades_cache=self._trades_cache,
+        )
 
     def get_origin_daily_breakdown(
         self,
@@ -691,6 +757,7 @@ class ExportDataService:
         self._bulk_cache = {k: v for k, v in self._bulk_cache.items() if not k[0]}
         self._daily_cache = {k: v for k, v in self._daily_cache.items() if not k[2]}
         self._split_cache = {k: v for k, v in self._split_cache.items() if not k[1]}
+        self._trades_cache.clear()
         clear_flows_disk_cache()
 
     def build_view(
@@ -816,6 +883,18 @@ class ExportDataService:
             with_intra_country=intra_country,
             with_intra_region=intra_region,
         )
+        unknown_trade_status = self.get_unknown_trade_status(
+            locations=locations,
+            products=product_tuple,
+            year=target_year,
+            month=month,
+            as_of=as_of,
+            flow_direction=direction,
+            with_forecast_live=with_forecast_live,
+            with_intra_country=intra_country,
+            with_intra_region=intra_region,
+            country_totals=destinations_mtd,
+        )
         origin_daily = self.get_origin_daily_breakdown(
             locations=locations,
             products=product_tuple,
@@ -896,6 +975,7 @@ class ExportDataService:
             hist_by_year=hist,
             percentile_rank=pct_rank,
             destinations_mtd=destinations_mtd,
+            unknown_trade_status=unknown_trade_status,
             origin_daily=origin_daily,
             origin_cumulative=origin_cumulative,
             location_series=location_series,

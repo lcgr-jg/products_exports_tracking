@@ -29,6 +29,7 @@ from export_pace.figure import (
     make_heatmap_figure,
     make_kpi_strip,
     make_origin_cumulative_figure,
+    make_unknown_detail_content,
 )
 from export_pace.locations import (
     as_filter_list,
@@ -267,7 +268,17 @@ app.layout = dbc.Container(
         dcc.Loading(dcc.Graph(id="heatmap-chart"), type="dot", color="#2171b5"),
         dbc.Row(
             [
-                dbc.Col(dcc.Loading(dcc.Graph(id="destination-chart"), type="dot", color="#6baed6"), md=6),
+                dbc.Col(
+                    [
+                        dcc.Loading(
+                            dcc.Graph(id="destination-chart"),
+                            type="dot",
+                            color="#6baed6",
+                        ),
+                        html.Div(id="unknown-geo-panel"),
+                    ],
+                    md=6,
+                ),
                 dbc.Col(dcc.Loading(dcc.Graph(id="origin-chart"), type="dot", color="#3182bd"), md=6),
             ],
             className="g-3 mb-3",
@@ -428,6 +439,7 @@ def update_as_of_max(month, year):
     Output("chart", "figure"),
     Output("daily-chart", "figure"),
     Output("destination-chart", "figure"),
+    Output("unknown-geo-panel", "children"),
     Output("origin-chart", "figure"),
     Output("heatmap-chart", "figure"),
     Output("kpi-strip", "children"),
@@ -476,7 +488,7 @@ def update_view(
         return (
             empty,
             empty,
-            empty,
+            html.Div(),
             empty,
             empty,
             [],
@@ -491,7 +503,7 @@ def update_view(
         return (
             empty,
             empty,
-            empty,
+            html.Div(),
             empty,
             empty,
             [],
@@ -551,11 +563,12 @@ def update_view(
         )
     except Exception as exc:
         empty = make_figure_placeholder(f"Error loading data: {exc}")
-        return empty, empty, empty, empty, empty, [], html.Div(), str(exc), True, "danger", last_refresh
+        return empty, empty, html.Div(), empty, empty, [], html.Div(), str(exc), True, "danger", last_refresh
 
     dest_fig = make_destination_figure(view) or make_figure_placeholder(
         f"No {view.counterparty_label} breakdown for this selection."
     )
+    unknown_panel = make_unknown_detail_content(view)
     origin_fig = make_origin_cumulative_figure(view) or make_figure_placeholder(
         "Installation breakdown appears when exactly one zone is selected (no facilities)."
     )
@@ -568,6 +581,7 @@ def update_view(
         make_figure(view, fig_opts),
         make_daily_figure(view, fig_opts),
         dest_fig,
+        unknown_panel,
         origin_fig,
         heatmap_fig,
         make_kpi_strip(view),

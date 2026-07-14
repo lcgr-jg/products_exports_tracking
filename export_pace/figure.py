@@ -216,6 +216,90 @@ def make_destination_figure(view: ViewResult, *, top_n: int = 10) -> go.Figure |
     return fig
 
 
+def make_unknown_trade_status_panel(view: ViewResult) -> html.Div | None:
+    """Break down country-Unknown counterparty volume by Kpler trade status."""
+    from export_pace.unknown_trades import should_show_unknown_detail
+
+    detail = view.unknown_trade_status
+    if detail is None or not should_show_unknown_detail(view.destinations_mtd, detail):
+        return None
+
+    role = view.counterparty_label.rstrip("s")
+    unit = view.unit
+    total = float(detail.by_status.sum())
+    rows: list = []
+    max_val = float(detail.by_status.max())
+    status_colors = {
+        "In Transit": "#6baed6",
+        "Loading": "#fd8d3c",
+        "Scheduled": "#9e9ac8",
+        "Delivered": "#74c476",
+    }
+
+    for status, kb in detail.by_status.items():
+        pct = (kb / total * 100) if total > 0 else 0
+        bar_pct = (kb / max_val * 100) if max_val > 0 else 0
+        color = status_colors.get(status, "#6baed6")
+        rows.append(
+            html.Tr(
+                [
+                    html.Td(status, style={"width": "28%", "paddingRight": "8px"}),
+                    html.Td(
+                        html.Div(
+                            html.Div(
+                                style={
+                                    "width": f"{bar_pct:.0f}%",
+                                    "height": "14px",
+                                    "backgroundColor": color,
+                                    "borderRadius": "2px",
+                                    "minWidth": "4px",
+                                }
+                            ),
+                            style={
+                                "backgroundColor": "#eef2f7",
+                                "borderRadius": "2px",
+                                "height": "14px",
+                            },
+                        ),
+                        style={"width": "42%"},
+                    ),
+                    html.Td(
+                        f"{kb:,.0f} {unit} ({pct:.0f}%)",
+                        style={"width": "30%", "textAlign": "right", "whiteSpace": "nowrap"},
+                    ),
+                ]
+            )
+        )
+
+    return html.Div(
+        dbc.Card(
+            dbc.CardBody(
+                [
+                    html.H6(f"Unknown {role} — by cargo status", className="mb-1"),
+                    html.P(
+                        f"{detail.unknown_country_kb:,.0f} {unit} with unconfirmed "
+                        f"{role} country · {detail.n_cargos} cargo(s):",
+                        className="text-muted small mb-2",
+                    ),
+                    html.Table(
+                        [html.Tbody(rows)],
+                        style={"width": "100%", "fontSize": "0.875rem"},
+                    ),
+                    html.Small(
+                        "Source: Kpler Trades · status is fully populated even when destination is Unknown.",
+                        className="text-muted d-block mt-2",
+                    ),
+                ]
+            ),
+            className="mt-2",
+        )
+    )
+
+
+def make_unknown_detail_content(view: ViewResult) -> html.Div:
+    return make_unknown_trade_status_panel(view) or html.Div()
+
+
 def _installation_palette() -> list[str]:
     return [
         "#3182bd",

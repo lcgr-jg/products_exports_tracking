@@ -6,3 +6,5 @@ dash>=2.14.0
 dash-bootstrap-components>=1.5.0
 kpler-sdk>=1.0.64
 pyarrow>=18.0.0
+kaleido>=1.0.0
+confluent-kafka>=2.0.0
