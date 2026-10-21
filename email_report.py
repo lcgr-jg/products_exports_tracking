@@ -90,7 +90,7 @@ FIG_OPTS = FigureOptions(
 
 RECIPIENTS = (
     "luiscarlos.gaitan@jainglobal.com, "
-    "yves.Mindren@jainglobal.com, "
+    #"yves.Mindren@jainglobal.com, "
     "abderrahmane.mahoudi@jainglobal.com"
 )
 RECIPIENTS_CC: str | None = None
